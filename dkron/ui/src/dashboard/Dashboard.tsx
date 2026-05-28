@@ -8,6 +8,7 @@ import UntriggeredJobs from './UntriggeredJobs';
 import TotalJobs from './TotalJobs';
 import DnsIcon from '@mui/icons-material/Dns';
 import ExecutionStatsChart from './ExecutionStatsChart';
+import AnalyticsStats from './AnalyticsStats';
 
 const selectRowDisabled = () => false;
 
@@ -68,7 +69,7 @@ const Dashboard = () => {
                 <TotalJobs value={window.DKRON_TOTAL_JOBS || "0"} />
                 <SuccessfulJobs value={window.DKRON_SUCCESSFUL_JOBS || "0"} />
                 <FailedJobs value={window.DKRON_FAILED_JOBS || "0"} />
-                <UntriggeredJobs value={window.DKRON_UNTRIGGERED_JOBS || "0"} />
+                <AnalyticsStats />
             </Box>
 
             {/* Execution Stats Chart */}

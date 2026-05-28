@@ -151,6 +151,7 @@ func (h *HTTPTransport) APIRoutes(r *gin.RouterGroup, middleware ...gin.HandlerF
 	v1.POST("/unpause", h.unpauseHandler)
 
 	v1.GET("/stats", h.statsHandler)
+	v1.GET("/analytics", h.analyticsHandler)
 
 	v1.POST("/jobs", h.jobCreateOrUpdateHandler)
 	v1.PATCH("/jobs", h.jobCreateOrUpdateHandler)
