@@ -1,0 +1,13 @@
+# AI agents and tools
+.gemini/
+skill_agent/
+.antigravity/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

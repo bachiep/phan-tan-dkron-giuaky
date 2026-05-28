@@ -1,0 +1,13 @@
+docs
+static
+site
+public
+vendor
+docker-compose
+dkron_theme
+build/
+website
+dkron-*
+main
+*.data
+node_modules
