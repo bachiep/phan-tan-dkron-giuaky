@@ -1,216 +1,1300 @@
 # BÁO CÁO BÀI TẬP LỚN GIỮA KỲ: HỆ THỐNG PHÂN TÁN
+
 **Đề tài:** Tìm hiểu, cấu hình và phát triển mở rộng hệ thống lập lịch phân tán Dkron (Distributed Job Scheduler)
 
-**Mã nguồn lưu trữ:** `https://github.com/bachiep/phan-tan-dkron-giuaky.git`
+**Dự án gốc:** `https://github.com/dkron-io/dkron.git`
+
+**Mã nguồn nhóm:** `https://github.com/bachiep/dkron_phan_tan_prj.git`
+
+**Môn học:** Ứng dụng phân tán
+
+**Nhóm thực hiện:** 2 thành viên
+
+> Ghi chú: cần thay thông tin thành viên ở Chương 8 bằng họ tên và mã sinh viên thật trước khi nộp.
 
 ---
 
-## LỜI MỞ ĐẦU
-Trong kỷ nguyên Điện toán đám mây (Cloud Computing) và Kiến trúc vi dịch vụ (Microservices), các hệ thống phần mềm ngày càng trở nên phức tạp và phải xử lý khối lượng công việc khổng lồ. Một trong những thành phần không thể thiếu trong bất kỳ hệ thống backend nào là hệ thống lập lịch tác vụ (Job Scheduler) nhằm thực thi các công việc nền (background jobs) như: đồng bộ dữ liệu, dọn dẹp cơ sở dữ liệu, gửi email hàng loạt, hay huấn luyện mô hình học máy. 
+## MỤC LỤC
 
-Theo truyền thống, các kĩ sư thường sử dụng công cụ `cron` tích hợp sẵn trên hệ điều hành Linux. Mặc dù đơn giản và hiệu quả, `cron` truyền thống mang trong mình một điểm yếu chí mạng đối với các hệ thống quy mô lớn: **Rủi ro Điểm lỗi duy nhất (Single Point of Failure - SPOF)**. Nếu máy chủ vật lý chứa tiến trình `cron` gặp sự cố (cúp điện, lỗi phần cứng, mất kết nối mạng), toàn bộ hệ thống tác vụ nền sẽ tê liệt hoàn toàn. 
-
-Để giải quyết bài toán này, các **Hệ thống Lập lịch Phân tán (Distributed Job Schedulers)** đã ra đời. Báo cáo này tập trung vào việc nghiên cứu, cài đặt thực nghiệm hệ thống mã nguồn mở **Dkron**, đồng thời đi sâu vào việc tự thiết kế và phát triển thêm hai module phân tán nâng cao nhằm nâng cao khả năng giám sát và độ tin cậy của hệ thống.
+1. Lời mở đầu và định hướng báo cáo
+2. Tổng quan vừa đủ về Dkron
+3. Cài đặt, triển khai và khảo sát hệ thống gốc
+4. Định hướng cải tiến của nhóm
+5. Tính năng cải tiến 1: Analytics API
+6. Tính năng cải tiến 2: Webhook Processor Plugin
+7. Kiểm thử và thực nghiệm
+8. Tổng kết, phân công và hướng phát triển
+9. Tài liệu tham khảo
+10. Phụ lục
 
 ---
 
-## CHƯƠNG 1: TỔNG QUAN VÀ KIẾN TRÚC HỆ THỐNG DKRON
+## CHƯƠNG 1: LỜI MỞ ĐẦU VÀ ĐỊNH HƯỚNG BÁO CÁO
 
-### 1.1. Dkron là gì?
-Dkron là một hệ thống lên lịch công việc phân tán, linh hoạt và có khả năng chịu lỗi cực cao (Fault-tolerant). Dkron được viết hoàn toàn bằng ngôn ngữ Go (Golang), tận dụng ưu điểm xử lý đồng thời (Concurrency) ưu việt của Go. Hệ thống này có thể được triển khai dưới dạng một cụm (cluster) gồm nhiều máy chủ (nodes) hoạt động song song.
+### 1.1. Bối cảnh
 
-### 1.2. Các Giao thức Phân tán Cốt lõi
-Kiến trúc của Dkron là sự kết hợp hoàn hảo của hai giao thức mạng phân tán nổi tiếng:
+Trong các hệ thống backend hiện đại, việc thực thi các tác vụ theo lịch là nhu cầu rất phổ biến. Một hệ thống có thể cần chạy các công việc như đồng bộ dữ liệu, gửi email định kỳ, tạo báo cáo, dọn dẹp log, gọi API đối tác, kiểm tra sức khỏe hệ thống hoặc xử lý dữ liệu nền. Với một máy chủ đơn lẻ, công cụ `cron` truyền thống có thể đáp ứng tốt. Tuy nhiên, khi hệ thống mở rộng thành nhiều máy chủ hoặc nhiều dịch vụ, `cron` truyền thống bộc lộ hạn chế lớn.
 
-#### 1.2.1. Giao thức Gossip (thông qua thư viện Serf)
-Gossip protocol (hay còn gọi là Epidemic protocol) là một giao thức truyền thông phi tập trung, hoạt động tương tự như cách tin đồn lan truyền trong xã hội. Trong Dkron, Gossip được dùng để:
-* **Quản lý tư cách thành viên (Membership):** Khi một node mới gia nhập cụm, nó chỉ cần "chào" một node bất kỳ. Thông tin này sẽ lây lan theo cấp số nhân đến toàn bộ cụm.
-* **Phát hiện sự cố (Failure Detection):** Các node liên tục trao đổi các gói tin UDP kích thước nhỏ. Nếu một node ngừng phản hồi, các node khác sẽ lây lan thông tin rằng node đó đã "chết" (Failed), từ đó loại bỏ nó khỏi cụm.
+Hạn chế quan trọng nhất là **điểm lỗi duy nhất** (Single Point of Failure - SPOF). Nếu lịch chạy job chỉ nằm trên một máy chủ, khi máy chủ đó lỗi thì toàn bộ tác vụ nền sẽ dừng. Ngoài ra, `cron` truyền thống không có cơ chế bầu leader, không có đồng thuận, không tự phát hiện node lỗi, không đồng bộ trạng thái job giữa nhiều node và không có giao diện quản trị phân tán.
 
-#### 1.2.2. Thuật toán Đồng thuận Raft (Raft Consensus Algorithm)
-Trong một hệ phân tán đa máy chủ, làm sao để tất cả các máy chủ có cùng một lịch trình công việc mà không bị xung đột? Raft là thuật toán giải quyết bài toán đồng thuận (Consensus) này.
-* **Leader Election (Bầu chọn thủ lĩnh):** Dkron sử dụng Raft để bầu ra một node làm Leader (Thủ lĩnh). Chỉ Leader mới có quyền điều phối và phân phát các Job cho các node khác (Followers) thực thi.
-* **Log Replication (Sao chép trạng thái):** Mọi sự kiện (thêm job, xóa job) đều được Leader ghi vào Log và sao chép đến các Followers. Dữ liệu chỉ được xác nhận (Committed) khi có **quá bán (Quorum)** số node trong mạng xác nhận đã ghi log. Điều này giúp tránh hiện tượng chia rẽ mạng (Split-Brain).
+Dkron là một dự án mã nguồn mở giải quyết bài toán này bằng cách xây dựng một hệ thống lập lịch công việc phân tán. Dkron dùng Raft để đồng thuận và bầu leader, dùng Serf/Gossip để quản lý membership, cung cấp REST API, UI và kiến trúc plugin để mở rộng executor/processor.
+
+### 1.2. Định hướng của báo cáo
+
+Báo cáo này không đi quá sâu vào toàn bộ mã nguồn Dkron vì Dkron là một dự án lớn, có nhiều thành phần như Raft, Serf, scheduler, storage, gRPC, API, UI và plugin system. Nếu phân tích toàn bộ dự án ở mức chi tiết dòng mã, báo cáo sẽ bị dàn trải và không tập trung vào phần đóng góp của nhóm.
+
+Vì vậy, nhóm chọn cách trình bày như sau:
+
+- Giới thiệu Dkron ở mức đủ để hiểu hệ thống gốc.
+- Trình bày các thành phần Dkron có liên quan trực tiếp đến phần cải tiến.
+- Tập trung phân tích 2 tính năng mới do nhóm phát triển.
+- Làm rõ vì sao 2 tính năng này có liên quan đến hệ phân tán.
+- Trình bày mã nguồn, thiết kế, kiểm thử và thực nghiệm cho phần nhóm đã nâng cấp.
+
+Nói cách khác, Dkron là **nền tảng hệ phân tán được chọn để nghiên cứu**, còn trọng tâm báo cáo là **quá trình nhóm hiểu hệ thống và mở rộng nó bằng hai chức năng mới có ý nghĩa vận hành trong môi trường phân tán**.
+
+### 1.3. Hai chức năng nhóm phát triển
+
+Nhóm phát triển thêm 2 chức năng:
+
+1. **Analytics API**
+   - Bổ sung endpoint `/v1/analytics`.
+   - Tổng hợp số job, số execution, tỷ lệ thành công và thời gian chạy trung bình.
+   - Tối ưu việc đọc execution bằng BuntDB prefix scan thay vì truy vấn lặp theo từng job.
+   - Tích hợp hiển thị trên UI dashboard.
+
+2. **Webhook Processor Plugin**
+   - Bổ sung processor plugin gửi HTTP POST khi job hoàn thành.
+   - Gửi payload gồm job name, trạng thái, node chạy, output và thời gian.
+   - Dùng goroutine để xử lý bất đồng bộ.
+   - Dùng timeout và retry exponential backoff để tăng độ tin cậy khi gọi dịch vụ bên ngoài.
+
+### 1.4. Yêu cầu bài tập và cách nhóm đáp ứng
+
+Theo hướng dẫn bài tập lớn giữa kỳ, nhóm cần:
+
+- Chọn một dự án mã nguồn mở thuộc lĩnh vực hệ phân tán.
+- Tìm hiểu, cài đặt và thực nghiệm dự án.
+- Phát triển 2 tính năng mới liên quan đến xử lý phân tán.
+- Quản lý mã nguồn trên GitHub.
+- Viết báo cáo và trình bày đóng góp từng thành viên.
+
+Báo cáo này đáp ứng các yêu cầu trên bằng cách:
+
+- Chọn Dkron, một hệ thống lập lịch phân tán thực tế.
+- Cài đặt cụm 3 node bằng Docker Compose.
+- Khảo sát các thành phần liên quan: Raft, Serf, scheduler, API, storage, plugin.
+- Phát triển Analytics API và Webhook Processor Plugin.
+- Có test tự động cho các tính năng mới.
+- Có kịch bản thực nghiệm leader failover để minh họa tính chịu lỗi của cụm.
+
+---
+
+## CHƯƠNG 2: TỔNG QUAN VỪA ĐỦ VỀ DKRON
+
+### 2.1. Dkron là gì?
+
+Dkron là một hệ thống lập lịch công việc phân tán, có thể xem là phiên bản phân tán của `cron`. Thay vì đặt lịch chạy job trên một máy chủ duy nhất, Dkron cho phép chạy một cụm nhiều node. Các node phối hợp với nhau để lưu trạng thái job, bầu leader, phát hiện node lỗi và điều phối job.
+
+Dkron được viết bằng Go. Đây là lựa chọn phù hợp cho hệ thống phân tán vì Go có runtime nhẹ, hỗ trợ concurrency tốt bằng goroutine, dễ viết dịch vụ mạng, dễ biên dịch thành binary độc lập và dễ đóng gói trong container.
+
+Dkron có các đặc điểm chính:
+
+- Lập lịch job theo cron expression hoặc cú pháp `@every`.
+- Quản lý job qua REST API và UI.
+- Chỉ leader điều phối job để tránh chạy trùng.
+- Dùng Raft để đồng thuận và bầu leader.
+- Dùng Serf/Gossip để quản lý membership.
+- Hỗ trợ executor plugin để chạy nhiều loại job.
+- Hỗ trợ processor plugin để xử lý kết quả job.
+
+### 2.2. Vì sao Dkron phù hợp với môn học?
+
+Dkron phù hợp với môn Ứng dụng phân tán vì trong một dự án thực tế đã có nhiều khái niệm được học trong môn:
+
+| Khái niệm | Biểu hiện trong Dkron |
+| --- | --- |
+| Hệ phân tán nhiều node | Dkron cluster gồm nhiều server/agent |
+| Membership | Serf/Gossip quản lý node tham gia/rời cụm |
+| Failure detection | Node lỗi được phát hiện qua cơ chế membership |
+| Leader election | Raft bầu leader |
+| Consensus | Raft đảm bảo trạng thái commit khi đạt quorum |
+| Replication | Log trạng thái được sao chép giữa server |
+| Fault tolerance | Cụm 3 node chịu được lỗi 1 server khi còn quorum |
+| RPC | gRPC dùng cho giao tiếp nội bộ |
+| API service | Gin REST API quản trị job |
+| Extensibility | Plugin executor/processor |
+
+Nhóm không chọn Dkron chỉ để chạy thử một ứng dụng có sẵn, mà chọn vì Dkron có kiến trúc đủ rõ để nhóm có thể mở rộng bằng tính năng mới.
+
+### 2.3. Các thành phần liên quan đến phần cải tiến
+
+Báo cáo tập trung vào các thành phần có liên quan trực tiếp đến hai tính năng mới:
+
+| Thành phần | File/thư mục | Liên quan đến cải tiến |
+| --- | --- | --- |
+| HTTP API | `dkron/dkron/api.go` | Nơi đăng ký route `/v1/analytics` |
+| Storage | `dkron/dkron/store.go` | Nơi lưu job/execution, dùng cho Analytics API |
+| Execution model | `dkron/dkron/execution.go` | Dữ liệu đầu vào của Analytics và Webhook |
+| Job model | `dkron/dkron/job.go` | Dữ liệu job cần thống kê |
+| UI Dashboard | `dkron/ui/src/dashboard/` | Nơi hiển thị Analytics |
+| Plugin system | `dkron/plugin/` | Nền tảng để thêm Webhook Processor |
+| CLI plugin command | `dkron/cmd/` | Nơi đăng ký command cho plugin |
+
+### 2.4. Luồng hoạt động cơ bản
+
+Luồng hoạt động Dkron có thể tóm tắt như sau:
+
+1. Người dùng tạo job qua UI hoặc REST API.
+2. Dkron validate job và ghi trạng thái vào hệ thống.
+3. Leader điều phối scheduler.
+4. Khi đến lịch, leader chọn node để chạy job.
+5. Node thực thi job thông qua executor.
+6. Kết quả chạy job được ghi thành execution.
+7. Processor xử lý output hoặc kết quả execution nếu được cấu hình.
+
+Sơ đồ luồng tổng quát:
 
 ```mermaid
-graph TD
-    Client((Client/UI)) -->|REST API| L[Dkron Leader Node]
-    L -->|Raft Replication| F1[Dkron Follower 1]
-    L -->|Raft Replication| F2[Dkron Follower 2]
-    L -.->|Gossip / Serf| F1
-    L -.->|Gossip / Serf| F2
-    F1 -.->|Gossip / Serf| F2
-    
-    subgraph Dkron Cluster
-    L
-    F1
-    F2
-    end
+sequenceDiagram
+    participant U as User/UI
+    participant A as REST API
+    participant L as Dkron Leader
+    participant W as Worker Node
+    participant E as Executor
+    participant P as Processor
+    participant S as Storage
+
+    U->>A: Create/Update Job
+    A->>L: Commit job state
+    L->>S: Store job
+    L->>W: Trigger execution
+    W->>E: Run job
+    E-->>W: Output + status
+    W->>L: Report execution
+    L->>S: Store execution
+    L->>P: Process result
 ```
+
+Analytics API khai thác dữ liệu job/execution trong storage. Webhook Processor can thiệp ở bước processor sau khi execution hoàn thành.
+
+### 2.5. Raft, Serf và Quorum trong phạm vi báo cáo
+
+Báo cáo chỉ trình bày Raft và Serf ở mức cần thiết để hiểu Dkron:
+
+- **Raft** giúp cụm bầu leader và duy trì trạng thái nhất quán.
+- **Serf/Gossip** giúp các node biết nhau và phát hiện node lỗi.
+- **Quorum** quyết định số node tối thiểu để cụm còn hoạt động hợp lệ.
+
+Với cụm 3 server:
+
+```text
+Quorum = floor(3 / 2) + 1 = 2
+```
+
+Do đó cụm có thể chịu lỗi 1 server mà vẫn còn quorum. Đây là cơ sở cho kịch bản thực nghiệm dừng leader ở Chương 7.
 
 ---
 
-## CHƯƠNG 2: THIẾT KẾ VÀ PHÁT TRIỂN TÍNH NĂNG MỚI
+## CHƯƠNG 3: CÀI ĐẶT, TRIỂN KHAI VÀ KHẢO SÁT HỆ THỐNG GỐC
 
-Theo yêu cầu của đề tài, nhóm đã can thiệp vào mã nguồn gốc của Dkron để thiết kế thêm 2 tính năng phân tán hoàn toàn mới. Đây là phần thể hiện sự vận dụng kiến thức lý thuyết hệ phân tán vào giải quyết bài toán hiệu năng và độ tin cậy thực tế.
+### 3.1. Môi trường triển khai
 
-### 2.1. Tính năng 1: API Phân tích Dữ liệu Hệ thống (Analytics API)
+Môi trường đề xuất:
 
-#### 2.1.1. Đặt vấn đề và Lỗi N+1 Query
-Để cung cấp cái nhìn tổng quan cho Quản trị viên, hệ thống cần một API trả về các chỉ số: Tổng số Job, Tổng số lần thực thi, Tỷ lệ thành công (Success Rate) và Thời gian chạy trung bình (Avg Duration).
+| Thành phần | Yêu cầu |
+| --- | --- |
+| Git | Clone và quản lý mã nguồn |
+| Docker | Build và chạy container |
+| Docker Compose | Chạy cụm nhiều node |
+| Trình duyệt | Truy cập Dkron UI |
+| Go | Chạy test và build local nếu cần |
 
-**Thiết kế ngây thơ ban đầu (Naive Approach):**
-Ban đầu, nhóm duyệt qua danh sách tất cả các Jobs, sau đó với mỗi Job, hệ thống gọi hàm `GetExecutions()` để chọc vào Database lấy lịch sử chạy.
-* **Hậu quả:** Đây là **Lỗi N+1 Query** kinh điển. Trong một hệ phân tán, khi số lượng Job lên tới hàng ngàn, việc gọi liên tục N truy vấn vào Storage Engine sẽ gây ra nghẽn cổ chai mạng (Network Bottleneck) và khóa (Lock) cơ sở dữ liệu, đẩy độ trễ (Latency) lên rất cao.
+### 3.2. Cấu trúc thư mục chính
 
-#### 2.1.2. Giải pháp Tối ưu hóa: BuntDB Prefix-Scan & Type Assertion
-Để tối ưu, nhóm đã áp dụng kĩ thuật **Ép kiểu nội tại (Type Assertion)** trong Golang kết hợp cơ chế **Quét tiền tố (Prefix-Scan)**.
-Thay vì truy vấn N lần, thuật toán kiểm tra xem Engine đang lưu trữ có phải là `BuntDB` (cơ sở dữ liệu in-memory nội bộ của Dkron) hay không. Nếu đúng, nó bỏ qua tầng Interface và chọc thẳng vào DB, dùng hàm `list` để quét một lượt tất cả các khóa (keys) bắt đầu bằng tiền tố `executions:`.
+```text
+.
+├── docker-compose.yml
+├── docs/
+│   ├── BAO_CAO_GIUA_KY_DKRON.md
+│   └── HƯỚNG DẪN LÀM BÀI TẬP LỚN GIỮA KỲ.md
+└── dkron/
+    ├── cmd/
+    ├── dkron/
+    ├── plugin/
+    ├── ui/
+    ├── builtin/
+    ├── Dockerfile
+    └── go.mod
+```
 
-**Mã nguồn phân tích (`dkron/dkron/api_analytics.go`):**
-```go
-func (h *HTTPTransport) analyticsHandler(c *gin.Context) {
-    jobs, _ := h.agent.Store.GetJobs(c.Request.Context(), &JobOptions{})
-    var execs []*Execution
+### 3.3. Cấu hình cụm 3 node
 
-    // KĨ THUẬT TỐI ƯU HÓA TRUY VẤN
-    // Ép kiểu h.agent.Store (interface) về dạng concrete type *Store
-    // Điều này cho phép truy cập trực tiếp vào tầng thấp của CSDL BuntDB
-    if localStore, ok := h.agent.Store.(*Store); ok {
-        // Thay vì truy vấn N lần, ta quét toàn bộ các khóa chứa lịch sử
-        // chỉ trong 1 single transaction thông qua Prefix-scan.
-        kvs, err := localStore.list(executionsPrefix+":", false, &ExecutionOptions{})
-        if err == nil {
-            execs, _ = localStore.unmarshalExecutions(kvs, nil)
-        }
+File `docker-compose.yml` ở thư mục gốc tạo 3 service:
+
+- `dkron-server-1`
+- `dkron-server-2`
+- `dkron-server-3`
+
+Mỗi node chạy:
+
+```bash
+dkron agent --server \
+  --bootstrap-expect=3 \
+  --node-name=serverX \
+  --join=dkron-server-1 \
+  --join=dkron-server-2 \
+  --join=dkron-server-3
+```
+
+Ý nghĩa:
+
+| Tham số | Ý nghĩa |
+| --- | --- |
+| `agent` | Chạy Dkron agent |
+| `--server` | Node tham gia vai trò server |
+| `--bootstrap-expect=3` | Chờ đủ 3 server để bootstrap cụm |
+| `--node-name=serverX` | Tên định danh của node |
+| `--join` | Danh sách node để join cluster |
+
+Port mapping:
+
+| Node | Port host | Port container |
+| --- | --- | --- |
+| `dkron-server-1` | 8080 | 8080 |
+| `dkron-server-2` | 8081 | 8080 |
+| `dkron-server-3` | 8082 | 8080 |
+
+### 3.4. Lệnh chạy hệ thống
+
+Khởi động cụm:
+
+```bash
+docker compose up --build -d
+```
+
+Kiểm tra container:
+
+```bash
+docker compose ps
+```
+
+Xem log:
+
+```bash
+docker compose logs -f
+```
+
+Truy cập UI:
+
+```text
+http://localhost:8080/ui
+http://localhost:8081/ui
+http://localhost:8082/ui
+```
+
+### 3.5. Khảo sát API gốc
+
+Kiểm tra health:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Kiểm tra leader:
+
+```bash
+curl http://localhost:8080/v1/leader
+```
+
+Kiểm tra members:
+
+```bash
+curl http://localhost:8080/v1/members
+```
+
+Tạo job mẫu:
+
+```bash
+curl -X POST http://localhost:8080/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo_shell_job",
+    "schedule": "@every 1m",
+    "executor": "shell",
+    "executor_config": {
+      "command": "date"
     }
+  }'
+```
 
-    // CƠ CHẾ DỰ PHÒNG (FALLBACK) - Tính năng chống lỗi (Defensive Programming)
-    // Nếu hệ thống dùng Backend Storage khác (không phải BuntDB), 
-    // tự động lùi về giải pháp query truyền thống.
-    if execs == nil {
-        for _, job := range jobs {
-            jExecs, _ := h.agent.Store.GetExecutions(c.Request.Context(), job.Name, &ExecutionOptions{})
+Kiểm tra execution:
+
+```bash
+curl http://localhost:8080/v1/jobs/demo_shell_job/executions
+```
+
+### 3.6. Nhận xét sau khi khảo sát hệ thống gốc
+
+Sau khi khảo sát Dkron, nhóm nhận thấy:
+
+- Dkron đã có API quản lý job và execution.
+- Dkron đã có UI dashboard nhưng chưa có một API tổng hợp nhanh các chỉ số toàn cục theo hướng nhóm mong muốn.
+- Dkron có plugin processor nhưng chưa có processor webhook riêng theo thiết kế bất đồng bộ/retry của nhóm.
+- Dkron phù hợp để mở rộng vì đã có sẵn cấu trúc API, storage và plugin rõ ràng.
+
+Từ đó, nhóm chọn cải tiến theo hướng tăng khả năng quan sát hệ thống và tăng khả năng tích hợp với hệ thống giám sát bên ngoài.
+
+---
+
+## CHƯƠNG 4: ĐỊNH HƯỚNG CẢI TIẾN CỦA NHÓM
+
+### 4.1. Lý do chọn hướng cải tiến
+
+Một hệ thống phân tán không chỉ cần chạy được, mà còn cần quan sát được và tích hợp được với hệ thống khác. Khi vận hành một cụm job scheduler, quản trị viên thường cần biết:
+
+- Hệ thống hiện có bao nhiêu job?
+- Job chạy thành công hay thất bại nhiều?
+- Thời gian chạy trung bình có tăng bất thường không?
+- Khi job thất bại, có thể gửi thông báo ra ngoài không?
+- Nếu hệ thống giám sát bên ngoài chậm hoặc lỗi, Dkron có bị ảnh hưởng không?
+
+Hai tính năng nhóm phát triển xuất phát từ các câu hỏi này:
+
+- **Analytics API:** phục vụ quan sát trạng thái tổng thể.
+- **Webhook Processor Plugin:** phục vụ tích hợp thông báo ra bên ngoài.
+
+### 4.2. Mối liên hệ với hệ phân tán
+
+Hai tính năng không thay đổi thuật toán Raft hay Serf của Dkron, nhưng vẫn liên quan trực tiếp đến hệ phân tán ở các điểm:
+
+| Tính năng | Liên hệ với hệ phân tán |
+| --- | --- |
+| Analytics API | Tổng hợp dữ liệu job/execution của hệ thống lập lịch phân tán; tối ưu truy cập storage để tránh chi phí lặp; hỗ trợ quan sát trạng thái vận hành cluster |
+| Webhook Processor | Gửi kết quả execution từ node/job ra hệ thống bên ngoài qua mạng; xử lý lỗi mạng bằng timeout/retry; dùng async để tránh block pipeline chính |
+
+Trong thực tế, các tính năng quan sát, cảnh báo và tích hợp là phần rất quan trọng của hệ phân tán. Một hệ thống phân tán khó vận hành nếu không có khả năng nhìn thấy trạng thái và phản ứng với sự cố.
+
+### 4.3. Tiêu chí thiết kế
+
+Nhóm đặt ra các tiêu chí:
+
+1. **Không phá vỡ hệ thống gốc**
+   - Tính năng mới phải được thêm vào theo cấu trúc sẵn có.
+   - Không thay đổi hành vi cốt lõi của scheduler, Raft hoặc Serf.
+
+2. **Có liên hệ rõ với mã nguồn**
+   - Không chỉ viết lý thuyết, mà có file code cụ thể.
+   - Có test tự động kiểm tra logic chính.
+
+3. **Có giá trị vận hành**
+   - Analytics giúp quản trị viên nắm tình trạng nhanh.
+   - Webhook giúp kết nối với hệ thống giám sát/cảnh báo.
+
+4. **Có xử lý tình huống lỗi**
+   - Analytics có fallback nếu không dùng concrete store tối ưu.
+   - Webhook có timeout, retry và chạy bất đồng bộ.
+
+### 4.4. Tổng quan file thay đổi
+
+| File | Thay đổi |
+| --- | --- |
+| `dkron/dkron/api_analytics.go` | Thêm handler Analytics API |
+| `dkron/dkron/api.go` | Đăng ký route `/v1/analytics` |
+| `dkron/dkron/api_analytics_test.go` | Thêm test cho Analytics API |
+| `dkron/ui/src/dashboard/AnalyticsStats.tsx` | Thêm card hiển thị Analytics |
+| `dkron/ui/src/dashboard/Dashboard.tsx` | Gắn card Analytics vào dashboard |
+| `dkron/plugin/webhook/webhook.go` | Thêm Webhook Processor |
+| `dkron/plugin/webhook/webhook_test.go` | Thêm test cho Webhook Processor |
+| `dkron/cmd/webhook.go` | Đăng ký webhook plugin command |
+
+---
+
+## CHƯƠNG 5: TÍNH NĂNG CẢI TIẾN 1 - ANALYTICS API
+
+### 5.1. Vấn đề cần giải quyết
+
+Dkron có API lấy danh sách job và API lấy execution theo từng job. Tuy nhiên, nếu dashboard muốn hiển thị chỉ số tổng quan, client phải tự gọi nhiều API rồi tự tổng hợp. Ví dụ:
+
+1. Gọi API lấy danh sách job.
+2. Với từng job, gọi API lấy execution.
+3. Tính tổng số execution.
+4. Đếm số execution thành công.
+5. Tính thời gian chạy trung bình.
+
+Cách làm này có bất lợi:
+
+- Client phải thực hiện nhiều request.
+- Logic tổng hợp bị đẩy ra UI hoặc hệ thống ngoài.
+- Khi số job lớn, số request tăng theo số job.
+- Dashboard khó hiển thị nhanh trạng thái tổng quan.
+
+Do đó, nhóm thêm endpoint tổng hợp phía server:
+
+```text
+GET /v1/analytics
+```
+
+### 5.2. Mục tiêu chức năng
+
+Analytics API cần trả về:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `total_jobs` | Tổng số job trong hệ thống |
+| `total_executions` | Tổng số execution đã ghi nhận |
+| `success_rate` | Tỷ lệ execution thành công, giá trị 0 đến 1 |
+| `average_duration_sec` | Thời gian chạy trung bình theo giây |
+
+Response mẫu:
+
+```json
+{
+  "total_jobs": 1,
+  "total_executions": 2,
+  "success_rate": 0.5,
+  "average_duration_sec": 3
+}
+```
+
+### 5.3. Vị trí mã nguồn
+
+File chính:
+
+```text
+dkron/dkron/api_analytics.go
+```
+
+Route được đăng ký trong:
+
+```text
+dkron/dkron/api.go
+```
+
+Component UI:
+
+```text
+dkron/ui/src/dashboard/AnalyticsStats.tsx
+```
+
+Test:
+
+```text
+dkron/dkron/api_analytics_test.go
+```
+
+### 5.4. Thiết kế response
+
+Nhóm tạo struct:
+
+```go
+type AnalyticsResult struct {
+    TotalJobs          int     `json:"total_jobs"`
+    TotalExecutions    int     `json:"total_executions"`
+    SuccessRate        float64 `json:"success_rate"`
+    AverageDurationSec float64 `json:"average_duration_sec"`
+}
+```
+
+Cách đặt tên JSON dùng snake_case để phù hợp phong cách API phổ biến. `success_rate` được giữ dạng `0..1`, giúp API rõ nghĩa về mặt tính toán. UI có thể nhân 100 để hiển thị phần trăm.
+
+### 5.5. Vấn đề N+1 query
+
+Cách đơn giản nhất để tính analytics là:
+
+```go
+jobs := Store.GetJobs()
+for _, job := range jobs {
+    execs := Store.GetExecutions(job.Name)
+    allExecs = append(allExecs, execs...)
+}
+```
+
+Nếu hệ thống có `N` job, API phải gọi `GetExecutions()` `N` lần. Đây là dạng N+1 query. Khi số job tăng, API có thể chậm hơn vì phải lặp nhiều lần qua storage interface.
+
+Trong hệ phân tán, các API quan sát trạng thái thường được gọi thường xuyên bởi dashboard hoặc monitoring. Vì vậy, giảm số lần truy cập lặp là hướng cải tiến hợp lý.
+
+### 5.6. Giải pháp của nhóm: Prefix Scan
+
+Trong Dkron, execution được lưu trong storage theo key prefix. Khi storage là concrete type `*Store`, nhóm có thể dùng internal method để quét tất cả execution một lần:
+
+```go
+if localStore, ok := h.agent.Store.(*Store); ok {
+    kvs, err := localStore.list(executionsPrefix+":", false, &ExecutionOptions{})
+    if err == nil {
+        execs, _ = localStore.unmarshalExecutions(kvs, nil)
+    }
+}
+```
+
+Các kỹ thuật chính:
+
+- **Type assertion:** kiểm tra storage interface có phải `*Store`.
+- **Prefix scan:** lấy toàn bộ execution bằng prefix key.
+- **In-memory aggregation:** tính toán chỉ số sau khi đã có danh sách execution.
+
+So sánh:
+
+| Cách làm | Đặc điểm |
+| --- | --- |
+| N+1 query | Lặp qua từng job và gọi `GetExecutions()` nhiều lần |
+| Prefix scan | Quét execution một lần theo prefix rồi tổng hợp |
+
+### 5.7. Fallback để tránh phụ thuộc quá mức
+
+Vì `h.agent.Store` là interface, không nên bắt buộc mọi storage đều phải là `*Store`. Nếu type assertion không thành công hoặc không lấy được execution bằng prefix scan, API fallback về cách truyền thống:
+
+```go
+if execs == nil {
+    for _, job := range jobs {
+        jExecs, err := h.agent.Store.GetExecutions(
+            c.Request.Context(),
+            job.Name,
+            &ExecutionOptions{},
+        )
+        if err == nil {
             execs = append(execs, jExecs...)
         }
     }
-
-    // ... (Thực hiện tính toán Success Rate và Average Duration in-memory) ...
 }
 ```
-**Kết quả:** Phương pháp này chuyển toàn bộ gánh nặng mạng sang gánh nặng xử lý trên RAM (In-memory aggregation). Độ trễ API giảm từ hàng giây xuống chỉ còn **< 1ms**, đáp ứng hoàn hảo yêu cầu tính toán Big Data nội bộ.
+
+Điểm quan trọng là tính năng mới vừa có đường tối ưu, vừa không phá vỡ tính tương thích.
+
+### 5.8. Công thức tính toán
+
+Sau khi có `jobs` và `execs`, API tính:
+
+```go
+totalExecutions := len(execs)
+successCount := 0
+totalDuration := time.Duration(0)
+
+for _, ex := range execs {
+    if ex.Success {
+        successCount++
+    }
+    if !ex.FinishedAt.IsZero() && !ex.StartedAt.IsZero() {
+        totalDuration += ex.FinishedAt.Sub(ex.StartedAt)
+    }
+}
+```
+
+Công thức:
+
+```text
+success_rate = success_count / total_executions
+average_duration_sec = total_duration_seconds / total_executions
+```
+
+Nếu chưa có execution:
+
+```text
+success_rate = 0
+average_duration_sec = 0
+```
+
+Cách xử lý này tránh lỗi chia cho 0.
+
+### 5.9. Đăng ký endpoint
+
+Trong `dkron/dkron/api.go`, nhóm thêm:
+
+```go
+v1.GET("/analytics", h.analyticsHandler)
+```
+
+Endpoint nằm trong nhóm API `/v1`, cùng cấp với các endpoint như `/jobs`, `/members`, `/leader`, `/stats`.
+
+### 5.10. Tích hợp UI dashboard
+
+Component `AnalyticsStats.tsx` gọi:
+
+```tsx
+fetch('/v1/analytics')
+```
+
+Sau đó hiển thị:
+
+- Tỷ lệ thành công.
+- Thời gian chạy trung bình.
+
+Trong `Dashboard.tsx`, component được thêm vào stats grid để người dùng thấy ngay chỉ số khi mở dashboard.
+
+### 5.11. Kiểm thử
+
+Test: `TestAPIAnalytics`
+
+Kịch bản:
+
+1. Khởi tạo API test server.
+2. Tạo job `test_analytics_job`.
+3. Tạo execution thành công duration 2 giây.
+4. Tạo execution thất bại duration 4 giây.
+5. Gọi `/v1/analytics`.
+6. Kiểm tra kết quả:
+   - `total_jobs >= 1`
+   - `total_executions = 2`
+   - `success_rate = 0.5`
+   - `average_duration_sec = 3.0`
+
+Trong quá trình kiểm thử, nhóm phát hiện một lỗi ẩn trong test ban đầu: hai execution cùng dùng một `StartedAt` và cùng `NodeName`, trong khi key lưu execution của BuntDB phụ thuộc vào thời điểm bắt đầu và node thực thi. Vì vậy execution thứ hai có thể ghi đè execution thứ nhất, làm API chỉ đếm được 1 execution. Nhóm đã sửa test bằng cách cho execution thứ hai dùng `StartedAt` lệch 1 millisecond và `NodeName` khác, bảo đảm hai bản ghi execution có key riêng.
+
+Lệnh chạy:
+
+```bash
+go test ./dkron -run TestAPIAnalytics -count=1
+```
+
+### 5.12. Giá trị của cải tiến
+
+Analytics API giúp:
+
+- Dashboard không cần tự tổng hợp qua nhiều request.
+- Người quản trị nắm nhanh tình trạng hệ thống.
+- Hệ thống có thêm endpoint quan sát toàn cục.
+- Giảm chi phí đọc lặp khi storage là BuntDB `*Store`.
+
+Đây là cải tiến theo hướng vận hành hệ phân tán: quan sát trạng thái, giảm chi phí tổng hợp và cung cấp dữ liệu trực tiếp cho UI/monitoring.
+
+### 5.13. Hạn chế và hướng nâng cấp
+
+Hạn chế:
+
+- Chưa có filter theo khoảng thời gian.
+- Chưa thống kê theo từng job hoặc từng node.
+- Chưa có P95/P99 duration.
+- Chưa có benchmark chính thức với dữ liệu lớn.
+- Prefix scan phụ thuộc vào implementation nội bộ của `*Store`.
+
+Hướng nâng cấp:
+
+- Thêm query parameter `from`, `to`, `job`, `node`.
+- Thêm cache ngắn hạn cho dashboard.
+- Thêm benchmark so sánh N+1 và prefix scan.
+- Thêm biểu đồ execution theo ngày.
 
 ---
 
-### 2.2. Tính năng 2: Trình cắm Thông báo Bất đồng bộ (Webhook Processor Plugin)
+## CHƯƠNG 6: TÍNH NĂNG CẢI TIẾN 2 - WEBHOOK PROCESSOR PLUGIN
 
-#### 2.2.1. Đặt vấn đề và Lý thuyết Độ tin cậy (Reliability)
-Trong hệ thống phân tán, các Job khi chạy xong cần thông báo kết quả (thành công/thất bại, thời gian hoàn thành) về một Server giám sát tập trung thông qua Webhook (HTTP POST).
+### 6.1. Vấn đề cần giải quyết
 
-Nếu ta thực hiện gửi HTTP Request một cách **Đồng bộ (Synchronous)**, hệ thống sẽ gặp rủi ro nghiêm trọng: Hệ thống Dkron sẽ bị "treo" (Blocked) chờ phản hồi nếu mạng lưới bị chậm hoặc Server giám sát bị sập.
+Trong thực tế, khi một job hoàn thành, hệ thống thường cần gửi kết quả đến nơi khác:
 
-#### 2.2.2. Giải pháp: Goroutine Bất đồng bộ & Retry Exponential Backoff
-Nhóm đã phát triển Plugin Webhook tuân thủ kiến trúc RPC Plugin của Hashicorp. Để giải quyết vấn đề nghẽn đồng bộ, tác vụ gọi Webhook được bọc bên trong một **Goroutine Bất đồng bộ (Asynchronous)**. 
+- Monitoring dashboard.
+- Alerting service.
+- ChatOps bot.
+- Incident management system.
+- Audit/log service.
 
-Hơn thế nữa, theo định lý phân tán, "Mạng không bao giờ là đáng tin cậy 100%". Do đó, thuật toán **Thử lại với độ trễ tăng dần theo cấp số nhân (Exponential Backoff)** được áp dụng. Nếu request thất bại, nó sẽ chờ 500ms, sau đó là 1s, rồi 2s trước khi thử lại, giúp hệ thống không tạo ra "cơn bão truy vấn" (Request Storm) tự đánh sập chính nó.
+Dkron có plugin processor để xử lý output sau khi job chạy xong. Nhóm tận dụng cơ chế này để thêm Webhook Processor Plugin.
 
-**Sơ đồ hoạt động (Sequence Diagram):**
-```mermaid
-sequenceDiagram
-    participant D as Dkron Main Loop
-    participant W as Webhook Plugin
-    participant S as Monitoring Server
+Mục tiêu là khi job hoàn thành, plugin gửi một HTTP POST chứa thông tin execution đến URL được cấu hình.
 
-    D->>W: Process(Execution Results)
-    Note over W: Khởi tạo Goroutine ngầm
-    W-->>D: Trả về trạng thái ngay lập tức (Không block)
-    D->>D: Tiếp tục điều phối Job khác
+### 6.2. Vị trí mã nguồn
 
-    activate W
-    W->>S: HTTP POST (Attempt 1)
-    S-->>W: Timeout / 503 Service Unavailable
-    Note over W: Sleep 500ms (Exponential Backoff)
-    
-    W->>S: HTTP POST (Attempt 2)
-    S-->>W: 200 OK (Thành công)
-    deactivate W
+| File | Vai trò |
+| --- | --- |
+| `dkron/plugin/webhook/webhook.go` | Hiện thực processor |
+| `dkron/plugin/webhook/webhook_test.go` | Test processor |
+| `dkron/cmd/webhook.go` | Đăng ký plugin command |
+
+### 6.3. Thiết kế cấu hình
+
+Plugin đọc URL từ config:
+
+```go
+url, ok := args.Config["webhook_url"]
+if !ok || url == "" {
+    return args.Execution
+}
 ```
 
-**Mã nguồn phân tích (`dkron/plugin/webhook/webhook.go`):**
+Nếu không có `webhook_url`, plugin không làm gì và trả execution về nguyên trạng. Điều này giúp plugin an toàn khi cấu hình thiếu.
+
+### 6.4. Payload gửi đến webhook receiver
+
+Payload gồm:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `job_name` | Tên job |
+| `success` | Execution thành công hay thất bại |
+| `node_name` | Node thực thi job |
+| `output` | Output của job |
+| `started_at` | Thời điểm bắt đầu |
+| `finished_at` | Thời điểm kết thúc |
+
+Mã nguồn:
+
 ```go
-// Tác vụ được đẩy vào Goroutine để chạy ngầm, giải phóng tài nguyên cho Dkron
+payload := map[string]interface{}{
+    "job_name":  args.Execution.JobName,
+    "success":   args.Execution.Success,
+    "node_name": args.Execution.NodeName,
+    "output":    string(args.Execution.Output),
+}
+```
+
+Timestamp được thêm nếu tồn tại:
+
+```go
+if args.Execution.StartedAt != nil {
+    payload["started_at"] = args.Execution.StartedAt.AsTime().Format(time.RFC3339)
+}
+if args.Execution.FinishedAt != nil {
+    payload["finished_at"] = args.Execution.FinishedAt.AsTime().Format(time.RFC3339)
+}
+```
+
+Response gửi đi có dạng:
+
+```json
+{
+  "job_name": "backup_database",
+  "success": true,
+  "node_name": "server2",
+  "output": "backup completed",
+  "started_at": "2026-06-02T10:00:00Z",
+  "finished_at": "2026-06-02T10:00:03Z"
+}
+```
+
+### 6.5. Vì sao cần bất đồng bộ?
+
+Nếu gửi webhook đồng bộ, Dkron phải chờ webhook server phản hồi. Trong hệ phân tán, request mạng có thể chậm hoặc lỗi. Nếu endpoint giám sát bị treo, pipeline xử lý execution cũng bị kéo dài.
+
+Nhóm dùng goroutine:
+
+```go
 go func() {
-    maxRetries := 3
-    backoff := 500 * time.Millisecond
-    client := &http.Client{Timeout: 3 * time.Second}
-
-    for i := 0; i < maxRetries; i++ {
-        req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
-        req.Header.Set("Content-Type", "application/json")
-
-        resp, err := client.Do(req)
-        if err == nil {
-            _ = resp.Body.Close()
-            // Nhận phản hồi thành công từ 200 -> 299 thì ngưng vòng lặp
-            if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-                break 
-            }
-        }
-
-        // Kỹ thuật Exponential Backoff: tăng gấp đôi thời gian chờ sau mỗi lần fail
-        if i < maxRetries-1 {
-            time.Sleep(backoff)
-            backoff *= 2
-        }
-    }
+    // send webhook in background
 }()
 ```
 
+Nhờ đó:
+
+- `Process()` trả về nhanh.
+- Việc gửi webhook không chặn pipeline chính.
+- Job scheduler ít bị ảnh hưởng bởi độ trễ của hệ thống bên ngoài.
+
+Đây là điểm cải tiến quan trọng nhất của plugin.
+
+### 6.6. Timeout và retry
+
+Plugin tạo HTTP client có timeout:
+
+```go
+client := &http.Client{Timeout: 3 * time.Second}
+```
+
+Nếu request không hoàn thành trong 3 giây, client timeout. Điều này tránh việc goroutine chờ vô hạn.
+
+Plugin retry tối đa 3 lần:
+
+```go
+maxRetries := 3
+backoff := 500 * time.Millisecond
+```
+
+Sau mỗi lần thất bại:
+
+```go
+time.Sleep(backoff)
+backoff *= 2
+```
+
+Timeline:
+
+| Attempt | Nếu thất bại thì chờ |
+| --- | --- |
+| 1 | 500ms |
+| 2 | 1s |
+| 3 | Dừng |
+
+Nếu server trả status code 2xx:
+
+```go
+if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+    break
+}
+```
+
+Plugin xem là thành công và không retry tiếp.
+
+### 6.7. Sơ đồ hoạt động
+
+```mermaid
+sequenceDiagram
+    participant D as Dkron Pipeline
+    participant W as Webhook Processor
+    participant G as Goroutine
+    participant S as Webhook Server
+
+    D->>W: Process(execution)
+    W->>G: Start background task
+    W-->>D: Return execution immediately
+    G->>S: POST attempt 1
+    S-->>G: Timeout or 503
+    G->>G: Sleep 500ms
+    G->>S: POST attempt 2
+    S-->>G: 200 OK
+    G->>G: Stop
+```
+
+### 6.8. Tích hợp với HashiCorp go-plugin
+
+File `dkron/cmd/webhook.go` đăng ký plugin command:
+
+```go
+var webhookCmd = &cobra.Command{
+    Hidden: true,
+    Use:    "webhook",
+    Short:  "Webhook processor plugin for dkron",
+    Run: func(cmd *cobra.Command, args []string) {
+        plugin.Serve(&plugin.ServeConfig{
+            HandshakeConfig: dkplugin.Handshake,
+            Plugins: map[string]plugin.Plugin{
+                "processor": &dkplugin.ProcessorPlugin{
+                    Processor: &webhook.Webhook{},
+                },
+            },
+            GRPCServer: plugin.DefaultGRPCServer,
+        })
+    },
+}
+```
+
+Điểm quan trọng là nhóm không tạo một cơ chế plugin riêng, mà dùng đúng kiến trúc mở rộng sẵn có của Dkron.
+
+### 6.9. Kiểm thử
+
+Test: `TestWebhookProcessor`
+
+Kịch bản:
+
+1. Tạo mock HTTP server bằng `httptest.NewServer`.
+2. Tạo `Webhook` processor.
+3. Tạo execution giả lập.
+4. Cấu hình `webhook_url` là URL của mock server.
+5. Gọi `Process()`.
+6. Chờ goroutine gửi request.
+7. Kiểm tra mock server nhận request.
+8. Kiểm tra JSON payload đúng.
+
+Test thiếu config: `TestWebhookProcessor_NoConfig`
+
+Kịch bản:
+
+1. Tạo execution.
+2. Không truyền `webhook_url`.
+3. Gọi `Process()`.
+4. Kiểm tra execution trả về không đổi.
+
+Lệnh chạy:
+
+```bash
+go test ./plugin/webhook -count=1
+```
+
+### 6.10. Giá trị của cải tiến
+
+Webhook Processor giúp Dkron:
+
+- Kết nối với hệ thống giám sát bên ngoài.
+- Gửi thông tin execution theo thời gian gần thực.
+- Không phụ thuộc đồng bộ vào webhook server.
+- Có khả năng chịu lỗi mạng tạm thời nhờ retry.
+- Có timeout để tránh treo request.
+
+Trong môi trường phân tán, đây là cải tiến thực tế vì các thành phần thường giao tiếp qua mạng và phải xử lý lỗi mạng một cách phòng vệ.
+
+### 6.11. Hạn chế và hướng nâng cấp
+
+Hạn chế:
+
+- Goroutine là fire-and-forget, nếu process chết giữa lúc retry thì webhook có thể mất.
+- Chưa có persistent retry queue.
+- Chưa có cấu hình động cho retry/timeout.
+- Chưa có chữ ký HMAC để xác thực webhook.
+- Chưa có metric riêng cho webhook success/failure.
+- Chưa giới hạn kích thước output.
+
+Hướng nâng cấp:
+
+- Thêm cấu hình `max_retries`, `timeout`, `initial_backoff`.
+- Thêm HMAC signature.
+- Thêm queue lưu webhook chưa gửi thành công.
+- Thêm metric Prometheus.
+- Thêm filter chỉ gửi webhook khi job failed hoặc success.
+
 ---
 
-## CHƯƠNG 3: CÀI ĐẶT VÀ THỰC NGHIỆM ĐỘ CHỊU LỖI (CHAOS ENGINEERING)
+## CHƯƠNG 7: KIỂM THỬ VÀ THỰC NGHIỆM
 
-Để chứng minh tính phân tán và khả năng chịu lỗi của hệ thống, nhóm đã thiết lập cấu hình chạy cụm thông qua `docker-compose.yml` gồm 3 Node Server độc lập.
+### 7.1. Kiểm thử tự động cho tính năng mới
 
-### 3.1. Thiết lập Cụm Đồng thuận (Quorum)
-Trong cấu hình `docker-compose.yml`, các lệnh khởi chạy được gán cờ `--bootstrap-expect=3`. Theo luật của thuật toán Raft, một cụm chỉ đạt trạng thái đa số (Quorum) và có thể bầu ra Leader nếu số Node hoạt động lớn hơn `(N/2) + 1`. Với N=3, Quorum = 2. Điều này có nghĩa cụm Dkron của nhóm cho phép tối đa 1 node sập mà hệ thống vẫn hoạt động bình thường.
+Nhóm bổ sung test cho cả hai chức năng:
 
-### 3.2. Kịch bản thực nghiệm: Tắt nóng Leader Node (Leader Failure Simulation)
-Đây là kịch bản "Hỗn loạn" (Chaos Engineering) kinh điển để đánh giá hệ phân tán.
+| Test | File | Mục tiêu |
+| --- | --- | --- |
+| `TestAPIAnalytics` | `dkron/dkron/api_analytics_test.go` | Kiểm tra endpoint `/v1/analytics` tính đúng số job, execution, success rate và duration |
+| `TestWebhookProcessor` | `dkron/plugin/webhook/webhook_test.go` | Kiểm tra webhook processor gửi HTTP POST đúng payload |
+| `TestWebhookProcessor_NoConfig` | `dkron/plugin/webhook/webhook_test.go` | Kiểm tra thiếu config thì không làm thay đổi execution |
 
-* **Bước 1 (Trạng thái bình thường):** Khởi động 3 node. Dkron-server-1 tự động được bầu làm Leader thông qua thuật toán Raft. Các Job tạo ra được lưu tại Node 1 và sao chép an toàn (replicated) sang Node 2 và 3.
-* **Bước 2 (Gây lỗi):** Sử dụng lệnh `docker stop dkron-server-1` để ngắt điện đột ngột Node 1.
-* **Bước 3 (Phát hiện lỗi & Phản ứng):** 
-  * Ngay lập tức, giao thức **Serf (Gossip)** trên Node 2 và Node 3 phát hiện Node 1 mất kết nối (Missed Heartbeat) và đánh dấu Node 1 ở trạng thái `Failed`.
-  * Node 2 và Node 3 nhận ra đã mất Leader. Cả hai tiến hành quy trình **Election Timeout**. Node nào đếm ngược xong trước sẽ phát tín hiệu `RequestVote`.
-  * Một Leader mới (Ví dụ Node 2) được bầu lên với số phiếu là 2/3 (Đạt chuẩn Quorum).
-* **Bước 4 (Phục hồi):** Node 2 tiếp quản toàn bộ lịch trình công việc. Hệ thống tự động kích hoạt các job theo lịch mà không bỏ lỡ bất kì nhịp chạy nào (No downtime). Giao diện Analytics API vẫn phản hồi chính xác thông số do dữ liệu BuntDB đã được replicate từ trước.
+Lệnh chạy:
 
-=> **Kết luận thực nghiệm:** Cụm Dkron đã thể hiện khả năng chịu lỗi tuyệt đối (100% Fault Tolerance) trong giới hạn cho phép (1 node sập). Khắc phục triệt để lỗi SPOF của Cron truyền thống.
+```bash
+go test ./dkron -run TestAPIAnalytics -count=1
+go test ./plugin/webhook -count=1
+```
+
+Do môi trường máy phát triển không có sẵn `go` trong PATH, nhóm chạy test bằng Docker image build từ project:
+
+```bash
+docker run --rm -v "i:\Tài liệu đại học\Phân tánb\giuaKi\dkron:/app" -w /app giuaki-dkron-server-1:latest go test ./dkron -run TestAPIAnalytics -count=1
+docker run --rm -v "i:\Tài liệu đại học\Phân tánb\giuaKi\dkron:/app" -w /app giuaki-dkron-server-1:latest go test ./plugin/webhook -count=1
+```
+
+Kết quả kiểm thử:
+
+```text
+PASS: ok github.com/distribworks/dkron/v4/dkron 3.557s
+PASS: ok github.com/distribworks/dkron/v4/plugin/webhook 0.085s
+```
+
+Tiêu chí đạt:
+
+- Test Analytics trả status `200 OK`.
+- JSON Analytics có giá trị đúng với dữ liệu test.
+- Test Webhook nhận được request tại mock server.
+- Payload Webhook có đúng `job_name`, `success`, `node_name`, `output`, `started_at`, `finished_at`.
+- Khi thiếu `webhook_url`, processor không gửi request và không làm thay đổi execution.
+
+### 7.2. Thực nghiệm khởi động cụm
+
+Khởi động:
+
+```bash
+docker compose up --build -d
+```
+
+Kiểm tra:
+
+```bash
+docker compose ps
+curl http://localhost:8080/v1/members
+curl http://localhost:8080/v1/leader
+```
+
+Kết quả mong đợi:
+
+- Có 3 container Dkron server chạy.
+- API `/v1/members` trả về 3 node.
+- API `/v1/leader` trả về một leader.
+- UI truy cập được qua `/ui`.
+
+### 7.3. Thực nghiệm Analytics API
+
+Tạo job:
+
+```bash
+curl -X POST http://localhost:8080/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo_shell_job",
+    "schedule": "@every 1m",
+    "executor": "shell",
+    "executor_config": {
+      "command": "date"
+    }
+  }'
+```
+
+Sau khi job chạy, gọi:
+
+```bash
+curl http://localhost:8080/v1/analytics
+```
+
+Kết quả mong đợi:
+
+```json
+{
+  "total_jobs": 1,
+  "total_executions": 1,
+  "success_rate": 1,
+  "average_duration_sec": 0.01
+}
+```
+
+Giá trị thực tế phụ thuộc số job, số execution và thời gian chạy. Điều cần kiểm tra là:
+
+- API trả `200 OK`.
+- Có đủ 4 trường.
+- `total_jobs` khớp số job.
+- `total_executions` tăng khi job chạy thêm.
+- `success_rate` nằm trong khoảng 0 đến 1.
+- `average_duration_sec` không âm.
+
+### 7.4. Thực nghiệm Webhook Processor
+
+Kịch bản:
+
+1. Khởi động webhook receiver hoặc mock server.
+2. Cấu hình job dùng processor webhook với `webhook_url`.
+3. Chạy job.
+4. Quan sát receiver nhận HTTP POST.
+5. Cho receiver trả lỗi tạm thời để kiểm tra retry.
+
+Kết quả mong đợi:
+
+- Receiver nhận payload JSON.
+- Payload có job name, success, node name, output và timestamp.
+- Khi endpoint lỗi, plugin retry tối đa 3 lần.
+- Hàm `Process()` không bị block bởi webhook request.
+
+### 7.5. Thực nghiệm leader failover
+
+Mục tiêu của thực nghiệm này không phải chứng minh tính năng mới thay đổi Raft, mà để chứng minh nhóm đã cài đặt và hiểu đặc tính phân tán cơ bản của Dkron.
+
+Bước 1: xác định leader:
+
+```bash
+curl http://localhost:8080/v1/leader
+```
+
+Bước 2: dừng container leader:
+
+```bash
+docker stop <leader-container-name>
+```
+
+Bước 3: kiểm tra leader mới qua node còn lại:
+
+```bash
+curl http://localhost:8081/v1/leader
+curl http://localhost:8082/v1/leader
+```
+
+Phân tích:
+
+```text
+N = 3
+Quorum = floor(3 / 2) + 1 = 2
+```
+
+Khi 1 node lỗi, cụm còn 2 node. Vì còn đủ quorum, cụm có thể bầu leader mới. Cần diễn đạt chính xác rằng cụm **chịu được lỗi 1 server trong điều kiện còn quorum**, không nên khẳng định "100% fault tolerance" hoặc "zero downtime tuyệt đối" nếu chưa có đo đạc cụ thể.
+
+### 7.6. Bảng tổng hợp kết quả
+
+| Hạng mục | Kết quả |
+| --- | --- |
+| Cài đặt Dkron | Có Docker Compose cụm 3 server |
+| Khảo sát hệ thống gốc | Có kiểm tra members, leader, jobs, executions |
+| Cải tiến 1 | Analytics API `/v1/analytics` |
+| Cải tiến 1 UI | Card Analytics trên Dashboard |
+| Cải tiến 1 test | `TestAPIAnalytics` |
+| Cải tiến 2 | Webhook Processor Plugin |
+| Cải tiến 2 test | `TestWebhookProcessor`, `TestWebhookProcessor_NoConfig` |
+| Thực nghiệm phân tán | Leader failover trong cụm 3 node |
+| Hạn chế | Chưa có benchmark lớn, chưa có persistent retry queue |
 
 ---
 
-## CHƯƠNG 4: TỔNG KẾT VÀ PHÂN CÔNG CÔNG VIỆC
+## CHƯƠNG 8: TỔNG KẾT, PHÂN CÔNG VÀ HƯỚNG PHÁT TRIỂN
 
-### 4.1. Tổng kết ưu nhược điểm
-**Ưu điểm:**
-* Cài đặt thành công cụm hệ phân tán thực tế thay vì lý thuyết mô phỏng.
-* Áp dụng kĩ thuật chống nghẽn mạng (Prefix-scan) để tối ưu hóa hiệu năng trong hệ phân tán.
-* Hiện thực hóa thành công các khái niệm Bất đồng bộ (Asynchronous) và Retry tuyến tính (Exponential backoff) giúp hệ thống bền bỉ (Resilient) hơn trước sự cố mạng lưới.
+### 8.1. Kết quả đạt được
 
-**Định hướng tương lai:**
-* Nghiên cứu tích hợp hệ thống lưu trữ phân tán Etcd hoặc Consul thay vì BuntDB cục bộ.
-* Tích hợp hệ thống Authentication/ACL cho các Endpoint API mở rộng.
+Nhóm đã:
 
-### 4.2. Phân công công việc (Team Contributions)
-Dự án được thực hiện với tinh thần phối hợp cao độ giữa các thành viên:
+- Tìm hiểu và cài đặt Dkron.
+- Hiểu các thành phần phân tán chính ở mức cần thiết: Raft, Serf/Gossip, quorum, leader.
+- Chạy cụm 3 node bằng Docker Compose.
+- Phát triển Analytics API để tổng hợp chỉ số vận hành.
+- Tối ưu Analytics API bằng prefix scan khi storage là `*Store`.
+- Thêm fallback để API vẫn tương thích.
+- Tích hợp Analytics vào UI dashboard.
+- Phát triển Webhook Processor Plugin.
+- Dùng goroutine để gửi webhook bất đồng bộ.
+- Dùng timeout và exponential backoff để xử lý lỗi mạng tạm thời.
+- Viết test tự động cho 2 tính năng.
 
-* **Thành viên 1 - Tên SV1 (Mã SV: ...):** 
-  * Tìm hiểu lý thuyết về thuật toán Raft và Gossip/Serf.
-  * Cấu hình cơ sở hạ tầng mạng phân tán bằng Docker Compose (`docker-compose.yml`).
-  * Trực tiếp lập trình API phân tích `api_analytics.go` (áp dụng kỹ thuật Type Assertion tối ưu) và thiết kế giao diện UI React (`AnalyticsStats.tsx`).
-* **Thành viên 2 - Tên SV2 (Mã SV: ...):**
-  * Tìm hiểu kiến trúc `hashicorp/go-plugin` và mô hình IPC/RPC.
-  * Lập trình Plugin `webhook.go` xử lý cơ chế Asynchronous Goroutine và Exponential Backoff.
-  * Viết mã kiểm thử tự động (Unit Test) thích ứng với đa luồng (`webhook_test.go`).
-  * Thực hiện bài test chạy thực nghiệm Chaos Engineering, tổng hợp dữ liệu báo cáo.
+### 8.2. Đóng góp chính của báo cáo
+
+Điểm nhấn của báo cáo là phần cải tiến, không phải mô tả lại toàn bộ Dkron. Cụ thể:
+
+- **Analytics API** cải thiện khả năng quan sát trạng thái hệ thống.
+- **Webhook Processor** cải thiện khả năng tích hợp với hệ thống giám sát bên ngoài.
+- Cả hai tính năng đều gắn với vấn đề thực tế trong hệ phân tán: quan sát, giao tiếp qua mạng, lỗi tạm thời, giảm blocking và thiết kế phòng vệ.
+
+### 8.3. Hạn chế
+
+Hạn chế chung:
+
+- Chưa có benchmark chính thức với số lượng job/execution lớn.
+- Chưa có ảnh/log thực nghiệm được chèn trực tiếp vào báo cáo.
+- Chưa kiểm thử cụm 5 node.
+- Chưa tích hợp bảo mật cho endpoint mới.
+
+Hạn chế Analytics:
+
+- Chưa filter theo thời gian/job/node.
+- Chưa có biểu đồ chi tiết.
+- Chưa có percentile duration.
+
+Hạn chế Webhook:
+
+- Chưa có persistent retry queue.
+- Chưa có HMAC signature.
+- Chưa có metric webhook riêng.
+- Chưa cho cấu hình retry/timeout từ job config.
+
+### 8.4. Hướng phát triển
+
+Hướng phát triển Analytics:
+
+- Thêm filter `from`, `to`, `job`, `node`.
+- Thêm biểu đồ execution theo ngày.
+- Thêm thống kê job thất bại nhiều nhất.
+- Thêm benchmark so sánh N+1 query và prefix scan.
+
+Hướng phát triển Webhook:
+
+- Thêm cấu hình `max_retries`, `timeout`, `backoff`.
+- Thêm persistent queue để tránh mất webhook khi process chết.
+- Thêm chữ ký HMAC.
+- Thêm Prometheus metrics.
+- Cho phép chỉ gửi webhook khi job failed.
+
+Hướng phát triển hệ thống:
+
+- Cải thiện tài liệu triển khai.
+- Bổ sung ảnh chụp UI và log thực nghiệm.
+- Thử nghiệm failover với cụm 5 node.
+- Kiểm tra ảnh hưởng của tính năng mới khi có nhiều execution.
+
+### 8.5. Phân công công việc
+
+> Cần thay thông tin thành viên thật trước khi nộp.
+
+| Thành viên | Công việc |
+| --- | --- |
+| Thành viên 1 - Họ tên: ... - MSSV: ... | Tìm hiểu Dkron, Raft, Serf/Gossip; cấu hình Docker Compose cụm 3 node; phát triển Analytics API; tối ưu prefix scan; tích hợp UI Dashboard; viết test `TestAPIAnalytics` |
+| Thành viên 2 - Họ tên: ... - MSSV: ... | Tìm hiểu plugin architecture và HashiCorp go-plugin; phát triển Webhook Processor; hiện thực goroutine, timeout, retry exponential backoff; viết test webhook; thực hiện thực nghiệm failover và tổng hợp báo cáo |
+
+### 8.6. Kết luận
+
+Dkron là một dự án phù hợp để nghiên cứu trong môn Ứng dụng phân tán vì hệ thống có cluster nhiều node, leader election, consensus, membership, API và plugin architecture. Trong phạm vi bài tập, nhóm không đi sâu toàn bộ mã nguồn Dkron mà tập trung vào việc hiểu các thành phần cần thiết để mở rộng hệ thống.
+
+Hai cải tiến được phát triển có ý nghĩa thực tế trong vận hành hệ phân tán. Analytics API giúp quan sát trạng thái tổng thể của job scheduler, còn Webhook Processor giúp gửi kết quả job ra hệ thống bên ngoài theo cách bất đồng bộ và có retry. Qua đó, nhóm thể hiện được quá trình tìm hiểu dự án gốc, cài đặt thực nghiệm và bổ sung chức năng mới dựa trên kiến trúc có sẵn.
+
+---
+
+## CHƯƠNG 9: TÀI LIỆU THAM KHẢO
+
+1. Dkron GitHub Repository: `https://github.com/dkron-io/dkron`
+2. Dkron Documentation: `https://dkron.io/docs`
+3. HashiCorp Raft: `https://github.com/hashicorp/raft`
+4. HashiCorp Serf: `https://www.serf.io/`
+5. HashiCorp go-plugin: `https://github.com/hashicorp/go-plugin`
+6. BuntDB: `https://github.com/tidwall/buntdb`
+7. Gin Web Framework: `https://github.com/gin-gonic/gin`
+8. Go Programming Language: `https://go.dev/`
+9. Reliable Cron across the Planet: `https://queue.acm.org/detail.cfm?id=2745840`
+10. Docker Compose Documentation: `https://docs.docker.com/compose/`
+
+---
+
+## PHỤ LỤC A: LỆNH THỰC NGHIỆM
+
+Khởi động cụm:
+
+```bash
+docker compose up --build -d
+```
+
+Xem container:
+
+```bash
+docker compose ps
+```
+
+Xem log:
+
+```bash
+docker compose logs -f
+```
+
+Kiểm tra health:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Kiểm tra leader:
+
+```bash
+curl http://localhost:8080/v1/leader
+```
+
+Kiểm tra members:
+
+```bash
+curl http://localhost:8080/v1/members
+```
+
+Tạo job:
+
+```bash
+curl -X POST http://localhost:8080/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo_shell_job",
+    "schedule": "@every 1m",
+    "executor": "shell",
+    "executor_config": {
+      "command": "date"
+    }
+  }'
+```
+
+Gọi Analytics API:
+
+```bash
+curl http://localhost:8080/v1/analytics
+```
+
+Dừng leader:
+
+```bash
+docker stop <leader-container-name>
+```
+
+Chạy test:
+
+```bash
+go test ./dkron -run TestAPIAnalytics -count=1
+go test ./plugin/webhook -count=1
+```
+
+Chạy test bằng Docker khi máy không có Go trong PATH:
+
+```bash
+docker run --rm -v "i:\Tài liệu đại học\Phân tánb\giuaKi\dkron:/app" -w /app giuaki-dkron-server-1:latest go test ./dkron -run TestAPIAnalytics -count=1
+docker run --rm -v "i:\Tài liệu đại học\Phân tánb\giuaKi\dkron:/app" -w /app giuaki-dkron-server-1:latest go test ./plugin/webhook -count=1
+```
+
+---
+
+## PHỤ LỤC B: CHECKLIST TRƯỚC KHI NỘP
+
+- [ ] Điền họ tên và mã sinh viên thật.
+- [ ] Chụp ảnh UI Dashboard có Analytics.
+- [ ] Chụp ảnh kết quả `curl /v1/analytics`.
+- [ ] Chụp ảnh/log `curl /v1/leader` trước và sau khi dừng leader.
+- [x] Chạy test tự động bằng Docker và ghi nhận kết quả PASS.
+- [ ] Đẩy code lên GitHub với lịch sử commit của từng thành viên.
+- [ ] Tạo slide trình bày 10 phút.
+- [ ] Chuẩn bị câu trả lời về Analytics API, Webhook Processor, Raft, Gossip, quorum, async và retry.
