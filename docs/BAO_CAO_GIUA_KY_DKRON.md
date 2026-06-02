@@ -4,7 +4,7 @@
 
 **Dự án gốc:** `https://github.com/dkron-io/dkron.git`
 
-**Mã nguồn nhóm:** `https://github.com/bachiep/dkron_phan_tan_prj.git`
+**Mã nguồn nhóm:** [bachiep/phan-tan-dkron-giuaky](https://github.com/bachiep/phan-tan-dkron-giuaky)
 
 **Môn học:** Ứng dụng phân tán
 
