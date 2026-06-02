@@ -22,22 +22,38 @@ func (h *HTTPTransport) analyticsHandler(c *gin.Context) {
 		return
 	}
 
-	totalExecutions := 0
+	var execs []*Execution
+
+	// Optimize: Avoid N+1 query bottleneck by fetching all execution records
+	// in a single database prefix scan instead of querying each job individually.
+	// Since we are using the local BuntDB Store, we can assert it and use its internal methods.
+	if localStore, ok := h.agent.Store.(*Store); ok {
+		kvs, err := localStore.list(executionsPrefix+":", false, &ExecutionOptions{})
+		if err == nil {
+			execs, _ = localStore.unmarshalExecutions(kvs, nil)
+		}
+	}
+
+	// Fallback to N+1 query if using a non-standard Storage implementation
+	if execs == nil {
+		for _, job := range jobs {
+			jExecs, err := h.agent.Store.GetExecutions(c.Request.Context(), job.Name, &ExecutionOptions{})
+			if err == nil {
+				execs = append(execs, jExecs...)
+			}
+		}
+	}
+
+	totalExecutions := len(execs)
 	successCount := 0
 	totalDuration := time.Duration(0)
 
-	for _, job := range jobs {
-		execs, err := h.agent.Store.GetExecutions(c.Request.Context(), job.Name, &ExecutionOptions{})
-		if err == nil {
-			for _, ex := range execs {
-				totalExecutions++
-				if ex.Success {
-					successCount++
-				}
-				if !ex.FinishedAt.IsZero() && !ex.StartedAt.IsZero() {
-					totalDuration += ex.FinishedAt.Sub(ex.StartedAt)
-				}
-			}
+	for _, ex := range execs {
+		if ex.Success {
+			successCount++
+		}
+		if !ex.FinishedAt.IsZero() && !ex.StartedAt.IsZero() {
+			totalDuration += ex.FinishedAt.Sub(ex.StartedAt)
 		}
 	}
 

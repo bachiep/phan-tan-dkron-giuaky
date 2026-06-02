@@ -53,6 +53,14 @@ func TestWebhookProcessor(t *testing.T) {
 	// 5. Call Process
 	processor.Process(args)
 
+	// Wait up to 1 second for the asynchronous background goroutine to execute
+	for i := 0; i < 20; i++ {
+		if requestCount > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// 6. Assertions
 	assert.Equal(t, 1, requestCount, "Expected exactly 1 HTTP request")
 	require.NotEmpty(t, receivedBody, "Expected a non-empty request body")

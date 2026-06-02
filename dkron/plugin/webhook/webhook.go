@@ -36,10 +36,36 @@ func (w *Webhook) Process(args *plugin.ProcessorArgs) *types.Execution {
 
 	body, err := json.Marshal(payload)
 	if err == nil {
-		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 5 * time.Second}
-		_, _ = client.Do(req)
+		// Run asynchronously in a background goroutine so that the webhook call
+		// doesn't block the main Dkron process execution pipeline.
+		go func() {
+			maxRetries := 3
+			backoff := 500 * time.Millisecond
+			client := &http.Client{Timeout: 3 * time.Second}
+
+			for i := 0; i < maxRetries; i++ {
+				req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+				if err != nil {
+					break
+				}
+				req.Header.Set("Content-Type", "application/json")
+
+				resp, err := client.Do(req)
+				if err == nil {
+					_ = resp.Body.Close()
+					// Check for successful HTTP status codes
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						break
+					}
+				}
+
+				// Exponential backoff sleep, except on last attempt
+				if i < maxRetries-1 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+			}
+		}()
 	}
 
 	return args.Execution
