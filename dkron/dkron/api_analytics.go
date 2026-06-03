@@ -9,10 +9,26 @@ import (
 
 // AnalyticsResult defines the JSON structure of the new Analytics endpoint
 type AnalyticsResult struct {
-	TotalJobs          int     `json:"total_jobs"`
-	TotalExecutions    int     `json:"total_executions"`
-	SuccessRate        float64 `json:"success_rate"`
-	AverageDurationSec float64 `json:"average_duration_sec"`
+	TotalJobs            int                      `json:"total_jobs"`
+	TotalExecutions      int                      `json:"total_executions"`
+	SuccessfulExecutions int                      `json:"successful_executions"`
+	FailedExecutions     int                      `json:"failed_executions"`
+	SuccessRate          float64                  `json:"success_rate"`
+	FailureRate          float64                  `json:"failure_rate"`
+	AverageDurationSec   float64                  `json:"average_duration_sec"`
+	MinDurationSec       float64                  `json:"min_duration_sec"`
+	MaxDurationSec       float64                  `json:"max_duration_sec"`
+	DurationSampleCount  int                      `json:"duration_sample_count"`
+	LastExecutionAt      *time.Time               `json:"last_execution_at,omitempty"`
+	ExecutionsByNode     map[string]NodeAnalytics `json:"executions_by_node"`
+}
+
+// NodeAnalytics summarizes execution outcomes for one Dkron node.
+type NodeAnalytics struct {
+	TotalExecutions      int     `json:"total_executions"`
+	SuccessfulExecutions int     `json:"successful_executions"`
+	FailedExecutions     int     `json:"failed_executions"`
+	AverageDurationSec   float64 `json:"average_duration_sec"`
 }
 
 func (h *HTTPTransport) analyticsHandler(c *gin.Context) {
@@ -46,30 +62,92 @@ func (h *HTTPTransport) analyticsHandler(c *gin.Context) {
 
 	totalExecutions := len(execs)
 	successCount := 0
+	failedCount := 0
 	totalDuration := time.Duration(0)
+	minDuration := time.Duration(0)
+	maxDuration := time.Duration(0)
+	durationSampleCount := 0
+	var lastExecutionAt *time.Time
+	nodeStats := make(map[string]NodeAnalytics)
+	nodeDurations := make(map[string]time.Duration)
+	nodeDurationSamples := make(map[string]int)
 
 	for _, ex := range execs {
 		if ex.Success {
 			successCount++
+		} else {
+			failedCount++
 		}
-		if !ex.FinishedAt.IsZero() && !ex.StartedAt.IsZero() {
-			totalDuration += ex.FinishedAt.Sub(ex.StartedAt)
+
+		nodeName := ex.NodeName
+		if nodeName == "" {
+			nodeName = "unknown"
+		}
+		nodeStat := nodeStats[nodeName]
+		nodeStat.TotalExecutions++
+		if ex.Success {
+			nodeStat.SuccessfulExecutions++
+		} else {
+			nodeStat.FailedExecutions++
+		}
+		nodeStats[nodeName] = nodeStat
+
+		if !ex.FinishedAt.IsZero() {
+			finishedAt := ex.FinishedAt
+			if lastExecutionAt == nil || finishedAt.After(*lastExecutionAt) {
+				lastExecutionAt = &finishedAt
+			}
+		}
+
+		if !ex.FinishedAt.IsZero() && !ex.StartedAt.IsZero() && !ex.FinishedAt.Before(ex.StartedAt) {
+			duration := ex.FinishedAt.Sub(ex.StartedAt)
+			totalDuration += duration
+			durationSampleCount++
+			nodeDurations[nodeName] += duration
+			nodeDurationSamples[nodeName]++
+
+			if minDuration == 0 || duration < minDuration {
+				minDuration = duration
+			}
+			if duration > maxDuration {
+				maxDuration = duration
+			}
 		}
 	}
 
 	successRate := 0.0
+	failureRate := 0.0
 	avgDuration := 0.0
 
 	if totalExecutions > 0 {
 		successRate = float64(successCount) / float64(totalExecutions)
-		avgDuration = totalDuration.Seconds() / float64(totalExecutions)
+		failureRate = float64(failedCount) / float64(totalExecutions)
+	}
+
+	if durationSampleCount > 0 {
+		avgDuration = totalDuration.Seconds() / float64(durationSampleCount)
+	}
+
+	for nodeName, nodeStat := range nodeStats {
+		if samples := nodeDurationSamples[nodeName]; samples > 0 {
+			nodeStat.AverageDurationSec = nodeDurations[nodeName].Seconds() / float64(samples)
+			nodeStats[nodeName] = nodeStat
+		}
 	}
 
 	result := AnalyticsResult{
-		TotalJobs:          len(jobs),
-		TotalExecutions:    totalExecutions,
-		SuccessRate:        successRate,
-		AverageDurationSec: avgDuration,
+		TotalJobs:            len(jobs),
+		TotalExecutions:      totalExecutions,
+		SuccessfulExecutions: successCount,
+		FailedExecutions:     failedCount,
+		SuccessRate:          successRate,
+		FailureRate:          failureRate,
+		AverageDurationSec:   avgDuration,
+		MinDurationSec:       minDuration.Seconds(),
+		MaxDurationSec:       maxDuration.Seconds(),
+		DurationSampleCount:  durationSampleCount,
+		LastExecutionAt:      lastExecutionAt,
+		ExecutionsByNode:     nodeStats,
 	}
 
 	renderJSON(c, http.StatusOK, result)

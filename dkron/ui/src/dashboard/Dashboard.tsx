@@ -1,14 +1,40 @@
+import { useEffect, useState } from 'react';
 import { Box, Card, CardContent, Typography } from '@mui/material';
 import { List, Datagrid, TextField } from 'react-admin';
 import { TagsField } from '../TagsField';
 import Leader from './Leader';
-import FailedJobs from './FailedJobs';
-import SuccessfulJobs from './SuccessfulJobs';
-import UntriggeredJobs from './UntriggeredJobs';
-import TotalJobs from './TotalJobs';
 import DnsIcon from '@mui/icons-material/Dns';
+import AssessmentIcon from '@mui/icons-material/Assessment';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import ErrorIcon from '@mui/icons-material/Error';
+import SpeedIcon from '@mui/icons-material/Speed';
+import UpdateIcon from '@mui/icons-material/Update';
 import ExecutionStatsChart from './ExecutionStatsChart';
 import AnalyticsStats from './AnalyticsStats';
+import CardWithIcon from './CardWithIcon';
+import { apiUrl, httpClient } from '../dataProvider';
+
+export interface NodeAnalytics {
+    total_executions: number;
+    successful_executions: number;
+    failed_executions: number;
+    average_duration_sec: number;
+}
+
+export interface AnalyticsData {
+    total_jobs: number;
+    total_executions: number;
+    successful_executions: number;
+    failed_executions: number;
+    success_rate: number;
+    failure_rate: number;
+    average_duration_sec: number;
+    min_duration_sec: number;
+    max_duration_sec: number;
+    duration_sample_count: number;
+    last_execution_at?: string;
+    executions_by_node?: Record<string, NodeAnalytics>;
+}
 
 const selectRowDisabled = () => false;
 
@@ -26,7 +52,49 @@ const fakeProps = {
     resource: "members"
 };
 
+const formatInteger = (value?: number, fallback = "0") => (
+    typeof value === 'number' ? value.toLocaleString() : fallback
+);
+
+const formatPercent = (value?: number) => (
+    typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '0.0%'
+);
+
+const formatSeconds = (value?: number) => (
+    typeof value === 'number' ? `${value.toFixed(2)}s` : '0.00s'
+);
+
 const Dashboard = () => {
+    const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+    const [analyticsLoading, setAnalyticsLoading] = useState(true);
+    const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+
+    useEffect(() => {
+        let active = true;
+
+        httpClient(`${apiUrl}/analytics`)
+            .then(({ json }) => {
+                if (active) {
+                    setAnalytics(json as AnalyticsData);
+                    setAnalyticsError(null);
+                }
+            })
+            .catch((error) => {
+                if (active) {
+                    setAnalyticsError(error instanceof Error ? error.message : 'Unable to load analytics data');
+                }
+            })
+            .finally(() => {
+                if (active) {
+                    setAnalyticsLoading(false);
+                }
+            });
+
+        return () => {
+            active = false;
+        };
+    }, []);
+
     return (
         <Box sx={{ p: { xs: 2, md: 3 } }}>
             {/* Header Section */}
@@ -59,17 +127,56 @@ const Dashboard = () => {
                         xs: '1fr',
                         sm: 'repeat(2, 1fr)',
                         md: 'repeat(3, 1fr)',
-                        lg: 'repeat(5, 1fr)'
+                        lg: 'repeat(6, 1fr)'
                     },
                     gap: { xs: 2, md: 3 },
                     mb: 4
                 }}
             >
                 <Leader value={window.DKRON_LEADER || "devel"} />
-                <TotalJobs value={window.DKRON_TOTAL_JOBS || "0"} />
-                <SuccessfulJobs value={window.DKRON_SUCCESSFUL_JOBS || "0"} />
-                <FailedJobs value={window.DKRON_FAILED_JOBS || "0"} />
-                <AnalyticsStats />
+                <CardWithIcon
+                    to="/jobs"
+                    icon={UpdateIcon}
+                    title="Total Jobs"
+                    subtitle={formatInteger(analytics?.total_jobs, window.DKRON_TOTAL_JOBS || "0")}
+                    color="#3182ce"
+                />
+                <CardWithIcon
+                    to="/executions"
+                    icon={AssessmentIcon}
+                    title="Total Executions"
+                    subtitle={formatInteger(analytics?.total_executions)}
+                    color="#805ad5"
+                />
+                <CardWithIcon
+                    to="/executions"
+                    icon={CheckCircleIcon}
+                    title="Success Rate"
+                    subtitle={formatPercent(analytics?.success_rate)}
+                    color="#38a169"
+                />
+                <CardWithIcon
+                    to="/executions"
+                    icon={ErrorIcon}
+                    title="Failed Executions"
+                    subtitle={formatInteger(analytics?.failed_executions, window.DKRON_FAILED_JOBS || "0")}
+                    color="#e53e3e"
+                />
+                <CardWithIcon
+                    to="/executions"
+                    icon={SpeedIcon}
+                    title="Avg Duration"
+                    subtitle={formatSeconds(analytics?.average_duration_sec)}
+                    color="#d69e2e"
+                />
+            </Box>
+
+            <Box sx={{ mb: 4 }}>
+                <AnalyticsStats
+                    stats={analytics}
+                    loading={analyticsLoading}
+                    error={analyticsError}
+                />
             </Box>
 
             {/* Execution Stats Chart */}

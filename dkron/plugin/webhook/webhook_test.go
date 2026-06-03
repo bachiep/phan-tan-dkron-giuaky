@@ -2,91 +2,176 @@ package webhook
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/distribworks/dkron/v4/plugin"
 	types "github.com/distribworks/dkron/v4/gen/proto/types/v1"
+	"github.com/distribworks/dkron/v4/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestWebhookProcessor(t *testing.T) {
-	// 1. Setup mock HTTP server
-	var receivedBody []byte
-	var requestCount int
+func TestWebhookProcessorSendsPayloadAndHeaders(t *testing.T) {
+	received := make(chan webhookRequest, 1)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		body, _ := ioutil.ReadAll(r.Body)
-		receivedBody = body
-		w.WriteHeader(http.StatusOK)
+		body, _ := io.ReadAll(r.Body)
+		received <- webhookRequest{
+			body:      body,
+			content:   r.Header.Get("Content-Type"),
+			auth:      r.Header.Get("X-Demo-Token"),
+			userAgent: r.Header.Get("User-Agent"),
+		}
+		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer ts.Close()
 
-	// 2. Setup Webhook processor
-	processor := &Webhook{}
-
-	// 3. Create Execution data
 	now := time.Now()
 	exec := &types.Execution{
 		JobName:    "test_webhook_job",
-		Success:    false, // Simulate a failed job
+		Success:    false,
 		NodeName:   "worker-1",
 		Output:     []byte("command failed"),
-		StartedAt:  timestamppb.New(now.Add(-time.Minute)),
+		Group:      42,
+		Attempt:    2,
+		StartedAt:  timestamppb.New(now.Add(-2 * time.Second)),
 		FinishedAt: timestamppb.New(now),
 	}
 
-	// 4. Configure processor with mock URL
-	args := &plugin.ProcessorArgs{
+	processor := &Webhook{}
+	result := processor.Process(&plugin.ProcessorArgs{
 		Execution: exec,
 		Config: plugin.Config{
 			"webhook_url": ts.URL,
+			"headers":     `{"X-Demo-Token":"secret","User-Agent":"dkron-webhook-test"}`,
+			"timeout":     "500ms",
+			"backoff":     "1ms",
 		},
-	}
+	})
 
-	// 5. Call Process
-	processor.Process(args)
+	assert.Equal(t, exec, result)
 
-	// Wait up to 1 second for the asynchronous background goroutine to execute
-	for i := 0; i < 20; i++ {
-		if requestCount > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// 6. Assertions
-	assert.Equal(t, 1, requestCount, "Expected exactly 1 HTTP request")
-	require.NotEmpty(t, receivedBody, "Expected a non-empty request body")
+	req := waitForWebhookRequest(t, received)
+	assert.Equal(t, "application/json", req.content)
+	assert.Equal(t, "secret", req.auth)
+	assert.Equal(t, "dkron-webhook-test", req.userAgent)
 
 	var payload map[string]interface{}
-	err := json.Unmarshal(receivedBody, &payload)
-	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(req.body, &payload))
 
+	assert.Equal(t, "dkron.execution.finished", payload["event"])
 	assert.Equal(t, "test_webhook_job", payload["job_name"])
 	assert.Equal(t, false, payload["success"])
 	assert.Equal(t, "worker-1", payload["node_name"])
 	assert.Equal(t, "command failed", payload["output"])
+	assert.Equal(t, float64(42), payload["group"])
+	assert.Equal(t, float64(2), payload["attempt"])
+	assert.Equal(t, float64(2), payload["duration_sec"])
 	assert.NotEmpty(t, payload["started_at"])
 	assert.NotEmpty(t, payload["finished_at"])
 }
 
-func TestWebhookProcessor_NoConfig(t *testing.T) {
+func TestWebhookProcessorRetriesFailedResponses(t *testing.T) {
+	var requestCount atomic.Int32
+	done := make(chan struct{}, 1)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requestCount.Add(1)
+		if count < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		done <- struct{}{}
+	}))
+	defer ts.Close()
+
+	processor := &Webhook{}
+	processor.Process(&plugin.ProcessorArgs{
+		Execution: &types.Execution{
+			JobName: "retry_webhook_job",
+			Success: false,
+		},
+		Config: plugin.Config{
+			"webhook_url": ts.URL,
+			"max_retries": "3",
+			"backoff":     "1ms",
+			"timeout":     "500ms",
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook retry success")
+	}
+
+	assert.Equal(t, int32(3), requestCount.Load())
+}
+
+func TestWebhookProcessorOnlyOnFailureSkipsSuccessfulExecution(t *testing.T) {
+	var requestCount atomic.Int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	processor := &Webhook{}
+	exec := &types.Execution{
+		JobName: "success_job",
+		Success: true,
+	}
+
+	result := processor.Process(&plugin.ProcessorArgs{
+		Execution: exec,
+		Config: plugin.Config{
+			"webhook_url":     ts.URL,
+			"only_on_failure": "true",
+		},
+	})
+
+	assert.Equal(t, exec, result)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), requestCount.Load())
+}
+
+func TestWebhookProcessorNoConfig(t *testing.T) {
 	processor := &Webhook{}
 	exec := &types.Execution{
 		JobName: "test_job",
 	}
 	args := &plugin.ProcessorArgs{
 		Execution: exec,
-		Config:    plugin.Config{}, // Missing webhook_url
+		Config:    plugin.Config{},
 	}
 
 	result := processor.Process(args)
 	assert.Equal(t, exec, result, "Expected unmodified execution when no config is provided")
+}
+
+type webhookRequest struct {
+	body      []byte
+	content   string
+	auth      string
+	userAgent string
+}
+
+func waitForWebhookRequest(t *testing.T, received <-chan webhookRequest) webhookRequest {
+	t.Helper()
+
+	select {
+	case req := <-received:
+		return req
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook request")
+		return webhookRequest{}
+	}
 }

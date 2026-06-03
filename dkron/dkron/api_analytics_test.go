@@ -76,6 +76,30 @@ func TestAPIAnalytics(t *testing.T) {
 	// We expect at least 1 job (the one we created)
 	assert.GreaterOrEqual(t, result["total_jobs"].(float64), float64(1))
 	assert.Equal(t, float64(2), result["total_executions"])
+	assert.Equal(t, float64(1), result["successful_executions"])
+	assert.Equal(t, float64(1), result["failed_executions"])
 	assert.Equal(t, float64(0.5), result["success_rate"])
+	assert.Equal(t, float64(0.5), result["failure_rate"])
 	assert.Equal(t, float64(3.0), result["average_duration_sec"]) // (2 + 4) / 2 = 3
+	assert.Equal(t, float64(2.0), result["min_duration_sec"])
+	assert.Equal(t, float64(4.0), result["max_duration_sec"])
+	assert.Equal(t, float64(2), result["duration_sample_count"])
+	assert.NotEmpty(t, result["last_execution_at"])
+
+	executionsByNode, ok := result["executions_by_node"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, executionsByNode, "node1")
+	require.Contains(t, executionsByNode, "node2")
+
+	node1 := executionsByNode["node1"].(map[string]interface{})
+	assert.Equal(t, float64(1), node1["total_executions"])
+	assert.Equal(t, float64(1), node1["successful_executions"])
+	assert.Equal(t, float64(0), node1["failed_executions"])
+	assert.Equal(t, float64(2.0), node1["average_duration_sec"])
+
+	node2 := executionsByNode["node2"].(map[string]interface{})
+	assert.Equal(t, float64(1), node2["total_executions"])
+	assert.Equal(t, float64(0), node2["successful_executions"])
+	assert.Equal(t, float64(1), node2["failed_executions"])
+	assert.Equal(t, float64(4.0), node2["average_duration_sec"])
 }
